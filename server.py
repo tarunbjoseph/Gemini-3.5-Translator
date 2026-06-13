@@ -86,7 +86,7 @@ async def websocket_endpoint(websocket: WebSocket, room: str, user: str, target_
     try:
         # Wait in the lobby until a second person joins
         while True:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
             if len(ROOMS[room]) == 2:
                 # Find the other person's WebSocket
                 peer_id = [uid for uid in ROOMS[room].keys() if uid != user][0]
