@@ -10,7 +10,7 @@ from google.genai import types
 app = FastAPI()
 client = None
 
-# Structure: { "room_id": { "user_id_1": WebSocket, "user_id_2": WebSocket } }
+# Structure: { "room_id": { "users": { "user": { "ws": WebSocket, "target_lang": str } }, "bridged": bool } }
 ROOMS = {}
 
 
@@ -109,27 +109,73 @@ async def bridge_user_to_gemini(user_ws: WebSocket, target_ws: WebSocket, target
         print(f"Pipeline closed for {user_name}: {e}")
 
 
+async def safe_send_text(websocket: WebSocket, payload: str):
+    try:
+        await websocket.send_text(payload)
+    except Exception:
+        pass
+
+
+async def announce_room_ready(room: str, first_user: str, second_user: str):
+    room_state = ROOMS.get(room)
+    if not room_state:
+        return
+
+    first_ws = room_state["users"].get(first_user, {}).get("ws")
+    second_ws = room_state["users"].get(second_user, {}).get("ws")
+    if not first_ws or not second_ws:
+        return
+
+    await safe_send_text(first_ws, json.dumps({
+        "type": "status",
+        "message": f"Connected with {second_user}",
+        "partner": second_user
+    }))
+    await safe_send_text(second_ws, json.dumps({
+        "type": "status",
+        "message": f"Connected with {first_user}",
+        "partner": first_user
+    }))
+
+
+async def start_bidirectional_bridge(room: str, user_a: str, user_b: str):
+    room_state = ROOMS.get(room)
+    if not room_state:
+        return
+
+    user_a_ws = room_state["users"][user_a]["ws"]
+    user_b_ws = room_state["users"][user_b]["ws"]
+    user_a_target = room_state["users"][user_a]["target_lang"]
+    user_b_target = room_state["users"][user_b]["target_lang"]
+
+    await announce_room_ready(room, user_a, user_b)
+
+    asyncio.create_task(bridge_user_to_gemini(user_a_ws, user_b_ws, user_a_target, user_a))
+    asyncio.create_task(bridge_user_to_gemini(user_b_ws, user_a_ws, user_b_target, user_b))
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, room: str, user: str, target_lang: str):
     await websocket.accept()
     
     if room not in ROOMS:
-        ROOMS[room] = {}
-        
-    ROOMS[room][user] = websocket
+        ROOMS[room] = {"users": {}, "bridged": False}
+
+    ROOMS[room]["users"][user] = {"ws": websocket, "target_lang": target_lang}
     print(f"[{user}] joined Room [{room}] | Target output: [{target_lang}]")
     
     try:
         # Wait in the lobby until a second person joins
         while True:
             await asyncio.sleep(0.1)
-            if len(ROOMS[room]) == 2:
-                # Find the other person's WebSocket
-                peer_id = [uid for uid in ROOMS[room].keys() if uid != user][0]
-                peer_ws = ROOMS[room][peer_id]
-                
-                # Start the translation bridge for this user
-                asyncio.create_task(bridge_user_to_gemini(websocket, peer_ws, target_lang, user))
+            room_state = ROOMS.get(room)
+            if not room_state:
+                break
+
+            if len(room_state["users"]) == 2 and not room_state["bridged"]:
+                room_state["bridged"] = True
+                user_ids = list(room_state["users"].keys())
+                await start_bidirectional_bridge(room, user_ids[0], user_ids[1])
                 break
                 
         # Keep the connection open while the conversation happens
@@ -139,7 +185,7 @@ async def websocket_endpoint(websocket: WebSocket, room: str, user: str, target_
     except WebSocketDisconnect:
         print(f"[{user}] left the call.")
     finally:
-        if room in ROOMS and user in ROOMS[room]:
-            del ROOMS[room][user]
-            if not ROOMS[room]:
+        if room in ROOMS and user in ROOMS[room]["users"]:
+            del ROOMS[room]["users"][user]
+            if not ROOMS[room]["users"]:
                 del ROOMS[room]
