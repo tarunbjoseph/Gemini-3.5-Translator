@@ -25,8 +25,8 @@
         .call-header { text-align: center; margin-bottom: 20px; }
         .status-badge { display: inline-block; background: #fef08a; color: #854d0e; padding: 6px 16px; border-radius: 20px; font-size: 13px; font-weight: bold; transition: all 0.3s; }
         .status-badge.connected { background: #dcfce7; color: #166534; }
-        .session-meta { margin-top: 10px; font-size: 13px; color: #475569; text-align: center; display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
-        .session-pill { background: #eef2ff; color: #3730a3; padding: 6px 12px; border-radius: 999px; font-weight: 600; }
+        .session-meta { margin-top: 10px; font-size: 12px; color: #475569; display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+        .session-pill { background: #eef2ff; color: #3730a3; padding: 6px 10px; border-radius: 6px; font-weight: 600; border: 1px solid #c7d2fe; }
         
         .controls-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
         
@@ -100,8 +100,9 @@
         <div class="status-badge" id="callStatus">Waiting for partner...</div>
         <div class="session-meta">
             <span class="session-pill" id="selfNamePill">You: -</span>
-            <span class="session-pill" id="roomPill">Room: -</span>
             <span class="session-pill" id="partnerPill">Partner: waiting...</span>
+            <span class="session-pill" id="spokenPill">Speaking: -</span>
+            <span class="session-pill" id="targetPill">Hearing: -</span>
         </div>
     </div>
     
@@ -133,7 +134,6 @@
     let partnerName = "";
     const MAX_PLAYBACK_LEAD_SECONDS = 0.2;
 
-    // Auto-fill room from URL if shared via link
     const urlParams = new URLSearchParams(window.location.search);
     if(urlParams.get('room')) document.getElementById('roomInput').value = urlParams.get('room');
 
@@ -156,37 +156,40 @@
         statusBadge.innerText = "Waiting for partner...";
         statusBadge.classList.remove("connected");
         document.getElementById('selfNamePill').innerText = "You: -";
-        document.getElementById('roomPill').innerText = "Room: -";
         document.getElementById('partnerPill').innerText = "Partner: waiting...";
+        document.getElementById('spokenPill').innerText = "Speaking: -";
+        document.getElementById('targetPill').innerText = "Hearing: -";
     }
 
     document.getElementById('joinBtn').onclick = async () => {
         const room = document.getElementById('roomInput').value.trim();
         const user = document.getElementById('userInput').value.trim();
-        const spokenLang = document.getElementById('spokenLang').value;
-        const targetLang = document.getElementById('targetLang').value;
+        const spokenSelect = document.getElementById('spokenLang');
+        const targetSelect = document.getElementById('targetLang');
+        
+        const spokenLang = spokenSelect.value;
+        const targetLang = targetSelect.value;
 
         if(!room || !user) { alert("Please fill in all fields."); return; }
 
         selfName = user;
         partnerName = "";
 
-        // Swap UI
+        // Swap UI & Set Pills
         document.getElementById('lobbyUI').style.display = 'none';
         document.getElementById('callUI').style.display = 'block';
-        window.history.pushState({}, '', `?room=${room}`); // Update URL for sharing
+        window.history.pushState({}, '', `?room=${room}`);
+        
         document.getElementById('selfNamePill').innerText = `You: ${user}`;
-        document.getElementById('roomPill').innerText = `Room: ${room}`;
         document.getElementById('partnerPill').innerText = "Partner: waiting...";
+        // Grab the actual text names of the languages (e.g. "Spanish" instead of "es")
+        document.getElementById('spokenPill').innerText = `Speaking: ${spokenSelect.options[spokenSelect.selectedIndex].text}`;
+        document.getElementById('targetPill').innerText = `Hearing: ${targetSelect.options[targetSelect.selectedIndex].text}`;
 
-        // Connect WebSocket
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?room=${room}&user=${user}&spoken_lang=${spokenLang}&target_lang=${targetLang}`);
         
-        // Let JS decide if incoming data is text or binary
         ws.binaryType = 'arraybuffer';
-
-        // Setup Audio Playback Context
         playbackContext = new AudioContext({ sampleRate: 24000, latencyHint: 'interactive' });
         let nextPlayTime = playbackContext.currentTime;
 
@@ -197,7 +200,6 @@
                 statusBadge.classList.add("connected");
             }
 
-            // If the server sends a STRING, it is either a status update or a transcript payload.
             if (typeof event.data === "string") {
                 const data = JSON.parse(event.data);
                 if (data.type === "status") {
@@ -211,7 +213,6 @@
                     appendTranscript(speakerLabel, data.text);
                 }
             } 
-            // If the server sends an ARRAYBUFFER, it is the live audio data
             else {
                 const audioData = new Int16Array(event.data);
                 const float32Data = new Float32Array(audioData.length);
@@ -236,24 +237,16 @@
             }
         };
 
-        // Capture Microphone Stream
         localStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true
-            }
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
         });
         audioContext = new AudioContext({ sampleRate: 16000 });
         localSource = audioContext.createMediaStreamSource(localStream);
-        
-        // Reduced buffer size for lower latency
         localProcessor = audioContext.createScriptProcessor(512, 1, 1);
         
         localSource.connect(localProcessor);
         localProcessor.connect(audioContext.destination);
 
-        // UI Controls Events
         document.getElementById('endCallBtn').onclick = () => {
             if (ws) ws.close();
             if (localProcessor) localProcessor.disconnect();
@@ -262,12 +255,8 @@
             if (playbackContext) playbackContext.close();
             if (localStream) localStream.getTracks().forEach(track => track.stop());
 
-            ws = null;
-            audioContext = null;
-            playbackContext = null;
-            localStream = null;
-            localProcessor = null;
-            localSource = null;
+            ws = null; audioContext = null; playbackContext = null;
+            localStream = null; localProcessor = null; localSource = null;
 
             resetCallUI();
         };
@@ -284,7 +273,7 @@
                 for (let i = 0; i < inputData.length; i++) {
                     pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
                 }
-                ws.send(pcmData.buffer); // Send raw audio chunks
+                ws.send(pcmData.buffer);
             }
         };
     };

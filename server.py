@@ -13,7 +13,6 @@ client = None
 # Structure: { "room_id": { "users": { "user": { "ws": WebSocket, "target_lang": str } }, "bridged": bool } }
 ROOMS = {}
 
-
 def get_gemini_client():
     global client
     if client is not None:
@@ -35,7 +34,6 @@ def get_gemini_client():
 def get():
     return FileResponse(Path(__file__).with_name("index.html"), media_type="text/html")
 
-
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
@@ -45,12 +43,11 @@ async def bridge_user_to_gemini(user_ws: WebSocket, target_ws: WebSocket, target
     Pipes User A's mic into Gemini, and sends the translated audio AND text transcripts to User B.
     """
     config = types.LiveConnectConfig(
-        response_modalities=["AUDIO"],
+        response_modalities=["AUDIO", "TEXT"], # FIX: Added TEXT so transcripts actually stream
         translation_config=types.TranslationConfig(
             target_language_code=target_lang,
             echo_target_language=False
         ),
-        # Enable text transcriptions for the UI
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig()
     )
@@ -87,17 +84,18 @@ async def bridge_user_to_gemini(user_ws: WebSocket, target_ws: WebSocket, target
                     async for response in gemini_session.receive():
                         if response.server_content and response.server_content.model_turn:
                             for part in response.server_content.model_turn.parts:
-                                # 1. If it's audio data, send as raw bytes
+                                # 1. Audio data
                                 if part.inline_data:
                                     await safe_send_bytes(target_ws, part.inline_data.data)
                                     
-                                # 2. If it's text data (transcript), send as a JSON string
+                                # 2. Text data (Transcripts)
                                 elif part.text:
                                     transcript_payload = json.dumps({
                                         "type": "transcript",
                                         "speaker": user_name,
                                         "text": part.text
                                     })
+                                    # Send transcript to both people so they both see the text
                                     await safe_send_text(target_ws, transcript_payload)
                                     await safe_send_text(user_ws, transcript_payload)
                 except Exception:
@@ -108,13 +106,11 @@ async def bridge_user_to_gemini(user_ws: WebSocket, target_ws: WebSocket, target
     except Exception as e:
         print(f"Pipeline closed for {user_name}: {e}")
 
-
 async def safe_send_text(websocket: WebSocket, payload: str):
     try:
         await websocket.send_text(payload)
     except Exception:
         pass
-
 
 async def announce_room_ready(room: str, first_user: str, second_user: str):
     room_state = ROOMS.get(room)
@@ -128,15 +124,14 @@ async def announce_room_ready(room: str, first_user: str, second_user: str):
 
     await safe_send_text(first_ws, json.dumps({
         "type": "status",
-        "message": f"Connected with {second_user}",
+        "message": f"Connected with {second_user}. Speak now!",
         "partner": second_user
     }))
     await safe_send_text(second_ws, json.dumps({
         "type": "status",
-        "message": f"Connected with {first_user}",
+        "message": f"Connected with {first_user}. Speak now!",
         "partner": first_user
     }))
-
 
 async def start_bidirectional_bridge(room: str, user_a: str, user_b: str):
     room_state = ROOMS.get(room)
@@ -152,7 +147,6 @@ async def start_bidirectional_bridge(room: str, user_a: str, user_b: str):
 
     asyncio.create_task(bridge_user_to_gemini(user_a_ws, user_b_ws, user_a_target, user_a))
     asyncio.create_task(bridge_user_to_gemini(user_b_ws, user_a_ws, user_b_target, user_b))
-
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, room: str, user: str, target_lang: str):
@@ -178,7 +172,7 @@ async def websocket_endpoint(websocket: WebSocket, room: str, user: str, target_
                 await start_bidirectional_bridge(room, user_ids[0], user_ids[1])
                 break
                 
-        # Keep the connection open while the conversation happens
+        # Keep the connection open
         while True:
             await asyncio.sleep(10)
             
@@ -187,5 +181,6 @@ async def websocket_endpoint(websocket: WebSocket, room: str, user: str, target_
     finally:
         if room in ROOMS and user in ROOMS[room]["users"]:
             del ROOMS[room]["users"][user]
+            ROOMS[room]["bridged"] = False # FIX: Reset bridged state so room can be reused
             if not ROOMS[room]["users"]:
                 del ROOMS[room]
