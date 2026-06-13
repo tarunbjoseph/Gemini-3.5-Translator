@@ -1,21 +1,44 @@
 import os
 import asyncio
 import json
+from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from google import genai
 from google.genai import types
 
 app = FastAPI()
-client = genai.Client()
+client = None
 
 # Structure: { "room_id": { "user_id_1": WebSocket, "user_id_2": WebSocket } }
 ROOMS = {}
 
+
+def get_gemini_client():
+    global client
+    if client is not None:
+        return client
+
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        key_file = Path(__file__).with_name("API Key.txt")
+        if key_file.exists():
+            api_key = key_file.read_text(encoding="utf-8").strip()
+
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set and API Key.txt was not found.")
+
+    client = genai.Client(api_key=api_key)
+    return client
+
 @app.get("/")
-async def get():
-    with open("index.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(f.read())
+def get():
+    return FileResponse(Path(__file__).with_name("index.html"), media_type="text/html")
+
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
 
 async def bridge_user_to_gemini(user_ws: WebSocket, target_ws: WebSocket, target_lang: str, user_name: str):
     """
@@ -33,7 +56,19 @@ async def bridge_user_to_gemini(user_ws: WebSocket, target_ws: WebSocket, target
     )
     
     try:
-        async with client.aio.live.connect(model="gemini-3.5-live-translate-preview", config=config) as gemini_session:
+        async with get_gemini_client().aio.live.connect(model="gemini-3.5-live-translate-preview", config=config) as gemini_session:
+
+            async def safe_send_text(websocket: WebSocket, payload: str):
+                try:
+                    await websocket.send_text(payload)
+                except Exception:
+                    pass
+
+            async def safe_send_bytes(websocket: WebSocket, payload: bytes):
+                try:
+                    await websocket.send_bytes(payload)
+                except Exception:
+                    pass
             
             # Task A: Receive Mic Audio -> Send to Gemini
             async def stream_mic_to_gemini():
@@ -54,7 +89,7 @@ async def bridge_user_to_gemini(user_ws: WebSocket, target_ws: WebSocket, target
                             for part in response.server_content.model_turn.parts:
                                 # 1. If it's audio data, send as raw bytes
                                 if part.inline_data:
-                                    await target_ws.send_bytes(part.inline_data.data)
+                                    await safe_send_bytes(target_ws, part.inline_data.data)
                                     
                                 # 2. If it's text data (transcript), send as a JSON string
                                 elif part.text:
@@ -63,7 +98,8 @@ async def bridge_user_to_gemini(user_ws: WebSocket, target_ws: WebSocket, target
                                         "speaker": user_name,
                                         "text": part.text
                                     })
-                                    await target_ws.send_text(transcript_payload)
+                                    await safe_send_text(target_ws, transcript_payload)
+                                    await safe_send_text(user_ws, transcript_payload)
                 except Exception:
                     pass
 
