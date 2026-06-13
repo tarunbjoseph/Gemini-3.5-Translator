@@ -1,81 +1,115 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Gemini Live Translator Prototype</title>
+    <meta charset="UTF-8">
+    <title>Global Live Voice Translator</title>
     <style>
-        body { font-family: sans-serif; text-align: center; padding: 50px; }
-        button { padding: 15px 30px; font-size: 18px; cursor: pointer; border-radius: 8px; border: 1px solid #ccc; background-color: #007bff; color: white;}
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; padding: 40px; background: #f8f9fa; }
+        .card { max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        select, input { width: 100%; padding: 10px; margin: 10px 0; border-radius: 6px; border: 1px solid #ccc; box-sizing: border-box; font-size: 16px; }
+        button { width: 100%; padding: 12px; font-size: 18px; cursor: pointer; border-radius: 6px; border: none; background-color: #28a745; color: white; font-weight: bold; }
         button:disabled { background-color: #6c757d; cursor: not-allowed; }
+        .status { margin-top: 15px; font-weight: bold; color: #007bff; }
     </style>
 </head>
 <body>
-    <h1>Real-Time Translator</h1>
-    <p>Speak in English, hear the translation in Spanish.</p>
-    <button id="startBtn">Start Call</button>
+
+<div class="card">
+    <h2>Global Translator Call</h2>
+    <p>Set up your room, pick the language you want the <b>other</b> person to hear, and share the link.</p>
     
-    <script>
-        let ws;
-        let audioContext;
+    <input type="text" id="roomInput" placeholder="Room Name (e.g., meeting123)" value="lobby">
+    <input type="text" id="userInput" placeholder="Your Name (e.g., Alice)">
+    
+    <label for="langSelect"><b>Translate my voice into:</b></label>
+    <select id="langSelect">
+        <option value="es">Spanish (Español)</option>
+        <option value="fr">French (Français)</option>
+        <option value="de">German (Deutsch)</option>
+        <option value="ja">Japanese (日本語)</option>
+        <option value="zh">Chinese (中文)</option>
+        <option value="it">Italian (Italiano)</option>
+        <option value="hi">Hindi (हिन्दी)</option>
+    </select>
+    
+    <button id="joinBtn">Join Translation Call</button>
+    <div id="statusLabel" class="status"></div>
+</div>
 
-        document.getElementById('startBtn').onclick = async () => {
-            document.getElementById('startBtn').disabled = true;
-            document.getElementById('startBtn').innerText = "Connecting...";
+<script>
+    let ws;
+    let audioContext;
 
-            // 1. Connect to your Python backend
-            ws = new WebSocket(`ws://${location.host}/ws`);
-            ws.binaryType = 'arraybuffer';
+    // Automatically parse room from URL query parameters if sharing links
+    const urlParams = new URLSearchParams(window.location.search);
+    if(urlParams.get('room')) document.getElementById('roomInput').value = urlParams.get('room');
 
-            // 2. Setup Audio Playback for Gemini's translated voice (24kHz)
-            const playbackContext = new AudioContext({ sampleRate: 24000 });
-            let nextPlayTime = playbackContext.currentTime;
+    document.getElementById('joinBtn').onclick = async () => {
+        const room = document.getElementById('roomInput').value.trim();
+        const user = document.getElementById('userInput').value.trim();
+        const targetLang = document.getElementById('langSelect').value;
 
-            ws.onmessage = async (event) => {
-                // When audio arrives from Gemini, queue it up to play
-                const audioData = new Int16Array(event.data);
-                const float32Data = new Float32Array(audioData.length);
-                for (let i = 0; i < audioData.length; i++) {
-                    float32Data[i] = audioData[i] / 0x7FFF;
-                }
-                
-                const buffer = playbackContext.createBuffer(1, float32Data.length, 24000);
-                buffer.getChannelData(0).set(float32Data);
-                const source = playbackContext.createBufferSource();
-                source.buffer = buffer;
-                source.connect(playbackContext.destination);
-                
-                // Keep playback smooth
-                if (nextPlayTime < playbackContext.currentTime) {
-                    nextPlayTime = playbackContext.currentTime;
-                }
-                source.start(nextPlayTime);
-                nextPlayTime += buffer.duration;
-            };
+        if(!room || !user) {
+            alert("Please fill in both Room Name and Your Name.");
+            return;
+        }
 
-            ws.onopen = async () => {
-                document.getElementById('startBtn').innerText = "Listening... Speak now!";
-                
-                // 3. Request Microphone Access and capture at 16kHz
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                audioContext = new AudioContext({ sampleRate: 16000 });
-                const source = audioContext.createMediaStreamSource(stream);
-                
-                // Process the raw audio data
-                const processor = audioContext.createScriptProcessor(4096, 1, 1);
-                source.connect(processor);
-                processor.connect(audioContext.destination);
+        document.getElementById('joinBtn').disabled = true;
+        document.getElementById('statusLabel').innerText = "Waiting for peer to join room...";
 
-                processor.onaudioprocess = (e) => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        const inputData = e.inputBuffer.getChannelData(0);
-                        const pcmData = new Int16Array(inputData.length);
-                        for (let i = 0; i < inputData.length; i++) {
-                            pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
-                        }
-                        ws.send(pcmData.buffer); // Send mic data to server
-                    }
-                };
-            };
+        // Update URL so it can be copied and shared easily
+        window.history.pushState({}, '', `?room=${room}`);
+
+        // Connect WebSocket to backend with configurations
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws?room=${room}&user=${user}&target_lang=${targetLang}`);
+        ws.binaryType = 'arraybuffer';
+
+        // Setup speaker playback stream (24kHz output from Gemini)
+        const playbackContext = new AudioContext({ sampleRate: 24000 });
+        let nextPlayTime = playbackContext.currentTime;
+
+        ws.onmessage = async (event) => {
+            document.getElementById('statusLabel').innerText = "Call Connected! Speaking...";
+            const audioData = new Int16Array(event.data);
+            const float32Data = new Float32Array(audioData.length);
+            for (let i = 0; i < audioData.length; i++) {
+                float32Data[i] = audioData[i] / 0x7FFF;
+            }
+            
+            const buffer = playbackContext.createBuffer(1, float32Data.length, 24000);
+            buffer.getChannelData(0).set(float32Data);
+            const source = playbackContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(playbackContext.destination);
+            
+            if (nextPlayTime < playbackContext.currentTime) {
+                nextPlayTime = playbackContext.currentTime;
+            }
+            source.start(nextPlayTime);
+            nextPlayTime += buffer.duration;
         };
-    </script>
+
+        // Capture microphone stream (16kHz input for Gemini)
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioContext = new AudioContext({ sampleRate: 16000 });
+        const source = audioContext.createMediaStreamSource(stream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+        
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+
+        processor.onaudioprocess = (e) => {
+            if (ws.readyState === WebSocket.OPEN) {
+                const inputData = e.inputBuffer.getChannelData(0);
+                const pcmData = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+                }
+                ws.send(pcmData.buffer);
+            }
+        };
+    };
+</script>
 </body>
 </html>
